@@ -607,7 +607,9 @@ fi
 %{_datadir}/applications/cutefish-preview.desktop
 
 %files compositor
-%license cutefish-compositor-%{version}/LICENSE
+# The upstream install already drops LICENSE and the protocol XML files into
+# the licenses directory under /usr/share, so an extra license macro line
+# would list the same file twice.
 %{_bindir}/cutefish-compositor
 %{_bindir}/cutefish-displayctl
 %{_bindir}/cutefish-screenshot
