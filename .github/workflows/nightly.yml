@@ -29,6 +29,15 @@ jobs:
       - name: Install packaging tools
         run: dnf -y install curl rpm-build copr-cli
 
+      - name: Check Copr credentials
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+        run: |
+          if [ -z "$COPR_CONFIG" ]; then
+            echo "::error::the COPR_CONFIG secret is not set; see README.md"
+            exit 1
+          fi
+
       - name: Build nightly SRPM
         run: ./scripts/make-nightly-srpm.sh
 
@@ -36,6 +45,9 @@ jobs:
       - name: Show source manifest
         run: cat build/sources/sources.lock
 
+      # --nowait: Copr builds the SRPM for up to six hours, which is far
+      # longer than this job's timeout.  Submit and let Copr run it; the build
+      # page is printed by copr-cli.
       - name: Submit to Copr
         env:
           COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
@@ -44,4 +56,5 @@ jobs:
           install -d -m 700 "$HOME/.config"
           printf '%s\n' "$COPR_CONFIG" > "$HOME/.config/copr"
           chmod 600 "$HOME/.config/copr"
-          copr-cli build "${COPR_PROJECT:-cutefish}" --timeout 21600 build/out/*.src.rpm
+          copr-cli build --nowait "${COPR_PROJECT:-cutefish}" \
+            --timeout 21600 build/out/*.src.rpm
