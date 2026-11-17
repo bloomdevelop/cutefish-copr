@@ -170,6 +170,10 @@ of `cutefish-dm`, mirroring what a manual Fedora install has to do.
 
 - `debug_package` is disabled: Skia and PDFium are linked statically and their
   debuginfo would be several gigabytes per nightly run.
+- `%build` installs every component into a staging tree
+  (`cutefish-0.1.0-stage`) so that the next component can link against it; rpm
+  empties `%{buildroot}` right before `%install`, which then copies the staging
+  tree over.
 - The compositor package is built with the Fedora PAM stack explicitly
   (`-DCUTEFISH_PAM_CONFIG=...`) instead of relying on the build root having
   `/etc/pam.d/system-auth`.

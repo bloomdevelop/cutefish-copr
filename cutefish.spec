@@ -14,6 +14,12 @@
 # debuginfo for Skia + PDFium is several GB per nightly build.
 %global debug_package %{nil}
 
+# %build installs every component as it goes, because the next component needs
+# the previous one's headers and libraries.  %{buildroot} cannot be used for
+# that: rpmbuild deletes it right before %install.  Stage the tree elsewhere
+# and copy it into %{buildroot} from %install.
+%global stage %{_builddir}/%{name}-%{version}-stage
+
 Name:           cutefish
 Version:        %{version}
 Release:        1.%{nightly_date}.%{nightly_run}%{?dist}
@@ -358,8 +364,8 @@ cp %{SOURCE18} cutefish-dm-%{version}/data/cutefish-dm.pam
 cp %{SOURCE19} cutefish-dm-%{version}/data/cutefish-dm-greeter.pam
 
 %build
-# The components find each other through the build root until the whole
-# source package is installed.
+# The components find each other through the staging tree until %install.
+rm -rf %{stage}
 build_one() {
     local src=$1
     shift
@@ -368,12 +374,12 @@ build_one() {
         -DCMAKE_INSTALL_PREFIX=%{_prefix} \
         -DCMAKE_INSTALL_LIBDIR=%{_lib} \
         -DCMAKE_INSTALL_LIBEXECDIR=%{_libexecdir} \
-        -DCMAKE_PREFIX_PATH="%{buildroot}%{_prefix};%{buildroot}%{_libdir}" \
+        -DCMAKE_PREFIX_PATH="%{stage}%{_prefix};%{stage}%{_libdir}" \
         -DCMAKE_C_FLAGS="%{optflags}" \
         -DCMAKE_CXX_FLAGS="%{optflags}" \
         -DBUILD_TESTING=OFF "$@"
     cmake --build "build/$src" --parallel %{_smp_build_ncpus}
-    DESTDIR=%{buildroot} cmake --install "build/$src"
+    DESTDIR=%{stage} cmake --install "build/$src"
 }
 
 # Skia and PDFium are not vendored; their pinned revisions are fetched here.
@@ -401,6 +407,10 @@ build_one cutefish-compositor-%{version} \
 build_one cutefish-wallpapers-%{version}
 
 %install
+# Everything was installed into %{stage} by %build; rpmbuild emptied
+# %{buildroot} before this section, so it has to be filled from there.
+cp -a %{stage}/. %{buildroot}/
+
 install -d %{buildroot}%{_prefix}/lib/tmpfiles.d
 install -m 644 %{SOURCE20} \
     %{buildroot}%{_prefix}/lib/tmpfiles.d/cutefish-dm.conf
