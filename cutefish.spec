@@ -613,3 +613,8 @@ fi
 %files l10n -f %{name}.lang
 
 %files desktop
+
+%changelog
+* Tue Nov 17 2026 Bloom Perez <valenplayer3000+code@gmail.com> - 0.1.0-1
+- Nightly snapshot of the Cutefish desktop environment, packaged from the
+  current upstream branches of the github.com/cutefishos repositories.

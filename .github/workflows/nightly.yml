@@ -24,7 +24,7 @@ jobs:
       - name: Install git for checkout
         run: dnf -y install git tar gzip
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install packaging tools
         run: dnf -y install curl rpm-build copr-cli

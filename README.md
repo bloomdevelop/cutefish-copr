@@ -48,7 +48,8 @@ sudo dnf install -y copr-cli
 This creates a project with the `fedora-45-x86_64` chroot and enables network
 access during builds (needed: the toolkit fetches Skia and the framework
 fetches PDFium from their upstream repositories). The workflow passes
-`--timeout 21600` (6 hours) to each build. Use
+`--timeout 21600` (6 hours) to each build and submits it with `--nowait`, so
+the GitHub job finishes once Copr has accepted the source package. Use
 `COPR_CHROOTS="fedora-45-x86_64 fedora-45-aarch64"` to add chroots, or
 `COPR_PROJECT=other-name` for a different project name.
 
@@ -176,3 +177,7 @@ of `cutefish-dm`, mirroring what a manual Fedora install has to do.
   timestamp in `Release` still uses the UTC date.
 - Scheduled workflows only run from the default branch, and GitHub disables
   them in a repository with no pushes for 60 days. Any push re-enables them.
+- If the workflow does not show up in the Actions tab (`gh workflow list` is
+  empty even though Actions is enabled), GitHub did not register that blob:
+  edit the file and push, the new blob is parsed again. This happened once
+  with a workflow that arrived in the same push that created the repository.
