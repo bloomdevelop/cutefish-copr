@@ -1,0 +1,47 @@
+name: nightly
+
+# GitHub cron is UTC. The run can start a few minutes late when the runner
+# pool is busy; it is still one build per day.
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  srpm:
+    runs-on: ubuntu-latest
+    container: fedora:45
+    timeout-minutes: 60
+    steps:
+      # The fedora image has no git, and actions/checkout needs it.
+      - name: Install git for checkout
+        run: dnf -y install git tar gzip
+
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: dnf -y install curl rpm-build copr-cli
+
+      - name: Build nightly SRPM
+        run: ./scripts/make-nightly-srpm.sh
+
+      # The pins that this run used, for copying into sources.lock.
+      - name: Show source manifest
+        run: cat build/sources/sources.lock
+
+      - name: Submit to Copr
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+          COPR_PROJECT: ${{ vars.COPR_PROJECT }}
+        run: |
+          install -d -m 700 "$HOME/.config"
+          printf '%s\n' "$COPR_CONFIG" > "$HOME/.config/copr"
+          chmod 600 "$HOME/.config/copr"
+          copr-cli build "${COPR_PROJECT:-cutefish}" --timeout 21600 build/out/*.src.rpm

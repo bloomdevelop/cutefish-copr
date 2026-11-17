@@ -1,0 +1,48 @@
+diff --git a/session/CMakeLists.txt b/session/CMakeLists.txt
+index 78aa0ff..12f87c0 100644
+--- a/session/CMakeLists.txt
++++ b/session/CMakeLists.txt
+@@ -27,6 +27,7 @@ target_link_libraries(${TARGET}
+ 
+ install(TARGETS ${TARGET} DESTINATION ${CMAKE_INSTALL_BINDIR})
+ install(PROGRAMS cutefish-wayland-session DESTINATION ${CMAKE_INSTALL_BINDIR})
++install(FILES cutefish-session.target DESTINATION /usr/lib/systemd/user)
+ install(FILES document-portal-stop.conf
+         DESTINATION /usr/lib/systemd/user/xdg-document-portal.service.d
+         RENAME cutefish-session.conf)
+diff --git a/session/cutefish-session.target b/session/cutefish-session.target
+new file mode 100644
+index 0000000..ec21374
+--- /dev/null
++++ b/session/cutefish-session.target
+@@ -0,0 +1,4 @@
++[Unit]
++Description=Cutefish session
++Requires=graphical-session.target
++After=graphical-session.target
+diff --git a/session/cutefish-wayland-session b/session/cutefish-wayland-session
+index 62ae35e..b035854 100755
+--- a/session/cutefish-wayland-session
++++ b/session/cutefish-wayland-session
+@@ -6,4 +6,21 @@ export DESKTOP_SESSION=Cutefish
+ export XDG_SESSION_TYPE=wayland
+ export WAYLAND_DISPLAY=cutefish-0
+ unset DISPLAY XAUTHORITY WAYLAND_SOCKET
++
++# systemd's graphical-session.target gates xdg-desktop-portal and the other
++# session services; nothing else starts it for Cutefish. Start it once the
++# compositor socket exists. When PAM did not start gnome-keyring (Cutefish DM
++# uses pam_oo7), also bring up Fedora 45's oo7 secret service.
++(
++    n=0
++    while [ ! -S "${XDG_RUNTIME_DIR}/${WAYLAND_DISPLAY}" ] && [ "$n" -lt 300 ]; do
++        sleep 0.1
++        n=$((n + 1))
++    done
++    systemctl --user start cutefish-session.target 2>/dev/null || true
++    if ! pgrep -u "$(id -u)" -f '/usr/bin/gnome-keyring-daemon' >/dev/null 2>&1; then
++        systemctl --user start oo7-daemon.service 2>/dev/null || true
++    fi
++) &
++
+ exec /usr/bin/cutefish-session "$@"
