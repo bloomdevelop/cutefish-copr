@@ -55,7 +55,9 @@ the GitHub job finishes once Copr has accepted the source package. Use
 
 ### 3. GitHub repository and secret
 
-The nightly job lives in `.github/workflows/nightly.yml`. From this directory:
+The nightly job lives in `.github/workflows/nightly.yml`; `.github/workflows/ci.yml`
+rebuilds the source package on every push and pull request and needs no
+secrets. From this directory:
 
 ```bash
 git add -A
