@@ -1,0 +1,44 @@
+name: ci
+
+# Cheap checks that the packaging inputs are still sane: the spec parses, the
+# helper scripts are valid shell, and a source RPM can be produced.  The build
+# itself happens in Copr (see nightly.yml).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  srpm:
+    runs-on: ubuntu-latest
+    container: fedora:45
+    timeout-minutes: 30
+    steps:
+      # The fedora image has no git, and actions/checkout needs it.
+      - name: Install git for checkout
+        run: dnf -y install git tar gzip
+
+      - uses: actions/checkout@v5
+
+      - name: Install packaging tools
+        run: dnf -y install curl rpm-build
+
+      - name: Check helper scripts
+        run: bash -n scripts/*.sh
+
+      - name: Parse the spec
+        run: rpmspec -P cutefish.spec > /dev/null
+
+      - name: Build a source RPM
+        run: ./scripts/make-nightly-srpm.sh
+
+      - name: Show the source manifest
+        run: cat build/sources/sources.lock
