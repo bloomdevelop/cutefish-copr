@@ -426,16 +426,16 @@ getent passwd cutefish-greeter >/dev/null || \
         -s /sbin/nologin -c 'Cutefish greeter' -m cutefish-greeter
 
 %post core
-%systemd_post cutefish-applications-folder.service cutefish-locales.service \
-    cutefish-privacy.service
+# The systemd macros take the complete unit list on one line: RPM ends a macro
+# invocation at the newline, so shell line continuations would turn the
+# remaining units into stray commands in the scriptlet.
+%systemd_post cutefish-applications-folder.service cutefish-locales.service cutefish-privacy.service
 
 %preun core
-%systemd_preun cutefish-applications-folder.service cutefish-locales.service \
-    cutefish-privacy.service
+%systemd_preun cutefish-applications-folder.service cutefish-locales.service cutefish-privacy.service
 
 %postun core
-%systemd_postun_with_restart cutefish-applications-folder.service \
-    cutefish-locales.service cutefish-privacy.service
+%systemd_postun_with_restart cutefish-applications-folder.service cutefish-locales.service cutefish-privacy.service
 
 %post dm
 install -d -m 700 -o cutefish-greeter -g cutefish-greeter \
