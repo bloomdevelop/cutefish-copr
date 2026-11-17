@@ -405,7 +405,9 @@ install -d %{buildroot}%{_prefix}/lib/tmpfiles.d
 install -m 644 %{SOURCE20} \
     %{buildroot}%{_prefix}/lib/tmpfiles.d/cutefish-dm.conf
 
-%find_lang %{name}
+# Each component installs its own gettext domain (cutefish-toolkit,
+# cutefish-core, ...), so match all of them instead of just `cutefish`.
+%find_lang %{name} --all-name
 
 %pre dm
 getent group cutefish-greeter >/dev/null || groupadd -r cutefish-greeter
