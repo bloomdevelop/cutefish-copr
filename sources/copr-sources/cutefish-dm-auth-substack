@@ -1,0 +1,12 @@
+#%PAM-1.0
+# Auth and password substack for cutefish-dm, mirroring GDM's
+# gdm-password-auth-substack. password-auth's pam_unix is "sufficient":
+# inside a plain include it would end the whole stack at pam_unix, so the
+# pam_oo7 lines in cutefish-dm placed after it would never run. Inside a
+# substack the success only ends the substack, and the outer stack
+# continues with the pam_oo7 lines.
+auth     include     password-auth
+auth     required    pam_deny.so
+
+password include     password-auth
+password required    pam_deny.so

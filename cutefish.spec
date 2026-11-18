@@ -48,6 +48,10 @@ Source17:       cutefish-wallpapers-%{version}.tar.gz
 Source18:       cutefish-dm.pam
 Source19:       cutefish-dm-greeter.pam
 Source20:       cutefish-dm.tmpfiles.conf
+# Auth/password substack so pam_oo7 runs after password-auth's
+# "sufficient" pam_unix, as gdm-password does; without it the login
+# keyring never unlocks and GOA finds no credentials.
+Source21:       cutefish-dm-auth-substack
 # Local fixes that are not upstream yet.
 Patch0:         0001-cutefish-core-session-target.patch
 Patch1:         0002-cutefish-qt-plugins-qt6.11.patch
@@ -415,6 +419,11 @@ install -d %{buildroot}%{_prefix}/lib/tmpfiles.d
 install -m 644 %{SOURCE20} \
     %{buildroot}%{_prefix}/lib/tmpfiles.d/cutefish-dm.conf
 
+# The PAM substack has no upstream equivalent, so unlike the two stacks
+# replaced inside the source tree it is installed directly.
+install -m 644 %{SOURCE21} \
+    %{buildroot}%{_sysconfdir}/pam.d/cutefish-dm-auth-substack
+
 # Each component installs its own gettext domain (cutefish-toolkit,
 # cutefish-core, ...), so match all of them instead of just `cutefish`.
 %find_lang %{name} --all-name
@@ -538,6 +547,7 @@ fi
 %{_prefix}/lib/tmpfiles.d/cutefish-dm.conf
 %{_datadir}/dbus-1/system.d/org.cutefish.DisplayManager.conf
 %config(noreplace) %{_sysconfdir}/pam.d/cutefish-dm
+%config(noreplace) %{_sysconfdir}/pam.d/cutefish-dm-auth-substack
 %config(noreplace) %{_sysconfdir}/pam.d/cutefish-dm-greeter
 
 %files filemanager

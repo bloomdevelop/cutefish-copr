@@ -2,12 +2,19 @@
 # Fedora stack for cutefish-dm. Upstream ships Debian's common-* includes,
 # which authselect does not provide; this uses password-auth instead.
 # pam_oo7 is Fedora 45's secret service, as GNOME's GDM uses.
+#
+# password-auth's pam_unix is "sufficient": a plain include would end the
+# auth/password stack at pam_unix, and the pam_oo7 lines after it would
+# never run, leaving the login keyring locked (GOA then finds no
+# credentials). The auth and password stacks therefore go through a
+# substack, exactly like gdm-password does, so the pam_oo7 lines below it
+# are reached.
 auth      requisite   pam_nologin.so
 auth      required    pam_succeed_if.so user != root quiet_success
-auth      include     password-auth
+auth      substack    cutefish-dm-auth-substack
 -auth     optional    pam_oo7.so
 account   include     password-auth
-password  include     password-auth
+password  substack    cutefish-dm-auth-substack
 -password optional    pam_oo7.so use_authtok
 session   required    pam_selinux.so close
 session   required    pam_loginuid.so

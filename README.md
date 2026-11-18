@@ -162,6 +162,13 @@ on a smaller machine.
   per-window theme-change call; this is needed to build against Fedora 45's Qt.
 - `sources/copr-sources/cutefish-dm*.pam` — Fedora PAM stacks replacing
   upstream's Debian `common-*` includes.
+- `sources/copr-sources/cutefish-dm-auth-substack` — auth/password substack
+  for `cutefish-dm`, mirroring `gdm-password-auth-substack`. `password-auth`'s
+  `pam_unix` is `sufficient`, so with a plain `include` the stack ends at
+  `pam_unix` and the `pam_oo7` lines after it never run — the login keyring
+  then stays locked and GNOME Online Accounts finds no credentials after
+  login. Inside a substack the `sufficient` only ends the substack and the
+  `pam_oo7` lines are reached.
 - `sources/copr-sources/cutefish-dm.tmpfiles.conf` — `/run/cutefish-dm` and
   `/var/lib/cutefish-dm` with the same permissions as GDM's directories.
 
