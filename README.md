@@ -57,6 +57,9 @@ This COPR contains Fedora-specific files/patches in order to be usable without i
   exports each window's menu bar to the shell from a D-Bus connection of its
   own, so applications whose session bus stops delivering calls (Krita) still
   show their menus in the top bar.
+- `patches/0004-cutefish-toolkit-fontconfig-freetype.patch`: includes
+  `fontconfig/fcfreetype.h`, where fontconfig declares `FcFreeTypeQueryAll`;
+  `fontconfig/fontconfig.h` does not include it.
 - `sources/copr-sources/cutefish-dm*.pam`: Fedora PAM stacks replacing
   upstream's Debian `common-*` includes.
 - `sources/copr-sources/cutefish-dm-auth-substack`: auth/password substack

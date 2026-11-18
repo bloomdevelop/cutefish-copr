@@ -56,6 +56,7 @@ Source21:       cutefish-dm-auth-substack
 Patch0:         0001-cutefish-core-session-target.patch
 Patch1:         0002-cutefish-qt-plugins-qt6.11.patch
 Patch2:         0003-cutefish-qt-plugins-menu-bar.patch
+Patch3:         0004-cutefish-toolkit-fontconfig-freetype.patch
 
 # Keep in sync with scripts/fetch-sources.sh and the Source list above.
 
@@ -359,6 +360,8 @@ for tarball in %{_sourcedir}/*-%{version}.tar.gz; do
     tar -xzf "$tarball"
 done
 
+patch -p1 -d cutefish-toolkit-%{version} \
+    < %{_sourcedir}/0004-cutefish-toolkit-fontconfig-freetype.patch
 patch -p1 -d cutefish-core-%{version} \
     < %{_sourcedir}/0001-cutefish-core-session-target.patch
 patch -p1 -d cutefish-qt-plugins-%{version} \
