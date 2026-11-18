@@ -55,6 +55,7 @@ Source21:       cutefish-dm-auth-substack
 # Local fixes that are not upstream yet.
 Patch0:         0001-cutefish-core-session-target.patch
 Patch1:         0002-cutefish-qt-plugins-qt6.11.patch
+Patch2:         0003-cutefish-qt-plugins-menu-bar.patch
 
 # Keep in sync with scripts/fetch-sources.sh and the Source list above.
 
@@ -362,6 +363,8 @@ patch -p1 -d cutefish-core-%{version} \
     < %{_sourcedir}/0001-cutefish-core-session-target.patch
 patch -p1 -d cutefish-qt-plugins-%{version} \
     < %{_sourcedir}/0002-cutefish-qt-plugins-qt6.11.patch
+patch -p1 -d cutefish-qt-plugins-%{version} \
+    < %{_sourcedir}/0003-cutefish-qt-plugins-menu-bar.patch
 
 # Upstream ships Debian PAM stacks; use the Fedora ones instead.
 cp %{SOURCE18} cutefish-dm-%{version}/data/cutefish-dm.pam

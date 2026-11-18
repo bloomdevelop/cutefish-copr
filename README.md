@@ -53,6 +53,10 @@ This COPR contains Fedora-specific files/patches in order to be usable without i
   from the session launcher.
 - `patches/0002-cutefish-qt-plugins-qt6.11.patch`: Qt 6.11 removed the
   per-window theme-change call, this is needed to build against Fedora 45's Qt.
+- `patches/0003-cutefish-qt-plugins-menu-bar.patch`: the platform theme
+  exports each window's menu bar to the shell from a D-Bus connection of its
+  own, so applications whose session bus stops delivering calls (Krita) still
+  show their menus in the top bar.
 - `sources/copr-sources/cutefish-dm*.pam`: Fedora PAM stacks replacing
   upstream's Debian `common-*` includes.
 - `sources/copr-sources/cutefish-dm-auth-substack`: auth/password substack

@@ -1,0 +1,847 @@
+diff --git a/README.md b/README.md
+index 5ba1cde..80156d4 100644
+--- a/README.md
++++ b/README.md
+@@ -2,9 +2,9 @@
+ 
+ Qt plugins that make Qt applications at home in the Cutefish session. The
+ `cutefish` platform theme makes them follow the system's dark mode, fonts,
+-icon and cursor themes, open the Cutefish file chooser, and scroll with the
+-same touchpad feel as Cutefish's own apps. The image format plugins add SVG,
+-HEIF/HEIC/AVIF and JPEG XL.
++icon and cursor themes, open the Cutefish file chooser, scroll with the same
++touchpad feel as Cutefish's own apps, and show their menu bar in the Cutefish
++menu bar. The image format plugins add SVG, HEIF/HEIC/AVIF and JPEG XL.
+ 
+ ## Dependencies
+ 
+diff --git a/platformtheme/CMakeLists.txt b/platformtheme/CMakeLists.txt
+index 87a9409..5d5719c 100644
+--- a/platformtheme/CMakeLists.txt
++++ b/platformtheme/CMakeLists.txt
+@@ -18,6 +18,8 @@ set (SRCS
+     waylandexport.cpp
+     platformtheme.h
+     platformtheme.cpp
++    cutefishmenubar.h
++    cutefishmenubar.cpp
+     filedialoghelper.h
+     filedialoghelper.cpp
+     hintsettings.h
+diff --git a/platformtheme/cutefishmenubar.cpp b/platformtheme/cutefishmenubar.cpp
+new file mode 100644
+index 0000000..91df999
+--- /dev/null
++++ b/platformtheme/cutefishmenubar.cpp
+@@ -0,0 +1,643 @@
++// Copyright 2026 Reion Wong <reionwong@gmail.com>
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#include "cutefishmenubar.h"
++
++#include <QAction>
++#include <QActionGroup>
++#include <QApplication>
++#include <QCoreApplication>
++#include <QDBusError>
++#include <QDBusMessage>
++#include <QDBusMetaType>
++#include <QDBusObjectPath>
++#include <QDBusVariant>
++#include <QDebug>
++#include <QEvent>
++#include <QGuiApplication>
++#include <QIcon>
++#include <QKeySequence>
++#include <QMenu>
++#include <QMenuBar>
++#include <QMetaObject>
++#include <QWidget>
++#include <QWindow>
++
++#include <qpa/qplatformintegration.h>
++
++#include <private/qdesktopunixservices_p.h>
++#include <private/qguiapplication_p.h>
++
++#include <utility>
++
++static const char *const kMenuInterface = "com.canonical.dbusmenu";
++static const char *const kRegistrarService = "com.canonical.AppMenu.Registrar";
++static const char *const kRegistrarPath = "/com/canonical/AppMenu/Registrar";
++static const char *const kRegistrarInterface = "com.canonical.AppMenu.Registrar";
++
++// The longest a menu bar waits for the registrar to answer, in milliseconds.
++static constexpr int kRegistrarTimeout = 2000;
++
++// Each menu bar exports one path on one connection; the counters keep both
++// apart when a process has several windows, or opens and closes them.
++static uint s_connectionCounter = 0;
++static uint s_pathCounter = 0;
++
++// The desktop services of the running platform integration, while the
++// application is still up.
++static QDesktopUnixServices *desktopServices()
++{
++    if (!QGuiApplication::instance())
++        return nullptr;
++    QPlatformIntegration *integration = QGuiApplicationPrivate::platformIntegration();
++    return integration ? dynamic_cast<QDesktopUnixServices *>(integration->services()) : nullptr;
++}
++
++static void ensureMenuTypes()
++{
++    static const bool registered = [] {
++        qDBusRegisterMetaType<CutefishMenuLayoutItem>();
++        // A dbusmenu shortcut, and the ids of a group reply, travel as
++        // containers of containers; without these the variant map holding
++        // them cannot be marshalled.
++        qDBusRegisterMetaType<QList<QStringList>>();
++        qDBusRegisterMetaType<QList<int>>();
++        return true;
++    }();
++    Q_UNUSED(registered);
++}
++
++QDBusArgument &operator<<(QDBusArgument &argument, const CutefishMenuLayoutItem &item)
++{
++    argument.beginStructure();
++    argument << item.id << item.properties;
++    argument.beginArray(QMetaType::fromType<QDBusVariant>());
++    for (const CutefishMenuLayoutItem &child : item.children)
++        argument << QDBusVariant(QVariant::fromValue(child));
++    argument.endArray();
++    argument.endStructure();
++    return argument;
++}
++
++const QDBusArgument &operator>>(const QDBusArgument &argument, CutefishMenuLayoutItem &item)
++{
++    item = CutefishMenuLayoutItem();
++    argument.beginStructure();
++    argument >> item.id >> item.properties;
++    argument.beginArray();
++    while (!argument.atEnd()) {
++        QDBusVariant variant;
++        argument >> variant;
++        const QDBusArgument childArgument = qvariant_cast<QDBusArgument>(variant.variant());
++        CutefishMenuLayoutItem child;
++        childArgument >> child;
++        item.children.append(child);
++    }
++    argument.endArray();
++    argument.endStructure();
++    return argument;
++}
++
++CutefishMenuBridge::CutefishMenuBridge(QObject *parent)
++    : QDBusVirtualObject(parent)
++    , m_connection(QString())
++{
++    ensureMenuTypes();
++}
++
++CutefishMenuBridge::~CutefishMenuBridge()
++{
++    if (m_menuBar)
++        m_menuBar->removeEventFilter(this);
++    for (QObject *watched : std::as_const(m_watched)) {
++        if (watched)
++            watched->removeEventFilter(this);
++    }
++}
++
++void CutefishMenuBridge::setAddress(const QDBusConnection &connection, const QString &path)
++{
++    m_connection = connection;
++    m_path = path;
++}
++
++QMenuBar *CutefishMenuBridge::menuBar() const
++{
++    return m_menuBar;
++}
++
++void CutefishMenuBridge::setMenuBar(QMenuBar *menuBar)
++{
++    if (m_menuBar == menuBar)
++        return;
++    m_menuBar = menuBar;
++    if (m_menuBar)
++        m_menuBar->installEventFilter(this);
++    m_ids.clear();
++    m_actions.clear();
++    m_watched.clear();
++    m_nextId = 1;
++    ++m_revision;
++}
++
++QString CutefishMenuBridge::convertMnemonic(const QString &label)
++{
++    // dbusmenu marks the mnemonic with an underscore, Qt with an ampersand.
++    const int index = label.indexOf(QLatin1Char('&'));
++    if (index < 0 || index == label.size() - 1)
++        return label;
++    QString converted(label);
++    converted[index] = QLatin1Char('_');
++    return converted;
++}
++
++QList<QStringList> CutefishMenuBridge::shortcutOf(const QKeySequence &sequence)
++{
++    QList<QStringList> shortcuts;
++    for (int i = 0; i < sequence.count(); ++i) {
++        const QString text = QKeySequence(sequence[i]).toString(QKeySequence::PortableText);
++        if (text.isEmpty())
++            continue;
++        const QStringList parts = text.split(QLatin1Char('+'));
++        QStringList keys;
++        for (int part = 0; part < parts.size(); ++part) {
++            const QString token = parts.at(part);
++            if (part == parts.size() - 1)
++                keys << token;
++            else if (token == QLatin1String("Ctrl") || token == QLatin1String("Control"))
++                keys << QStringLiteral("Control");
++            else if (token == QLatin1String("Meta") || token == QLatin1String("Super"))
++                keys << QStringLiteral("Super");
++            else if (token == QLatin1String("Alt"))
++                keys << QStringLiteral("Alt");
++            else if (token == QLatin1String("Shift"))
++                keys << QStringLiteral("Shift");
++            else if (token == QLatin1String("Num"))
++                keys << QStringLiteral("Num");
++            else
++                keys << token;
++        }
++        shortcuts << keys;
++    }
++    return shortcuts;
++}
++
++QVariantMap CutefishMenuBridge::layoutProperties(QAction *action)
++{
++    QVariantMap properties;
++    properties.insert(QStringLiteral("label"), convertMnemonic(action->text()));
++    properties.insert(QStringLiteral("enabled"), action->isEnabled());
++    properties.insert(QStringLiteral("visible"), action->isVisible());
++    if (action->isSeparator())
++        properties.insert(QStringLiteral("type"), QStringLiteral("separator"));
++    if (action->menu())
++        properties.insert(QStringLiteral("children-display"), QStringLiteral("submenu"));
++    if (action->isCheckable()) {
++        const bool radio = action->actionGroup() && action->actionGroup()->isExclusive();
++        properties.insert(QStringLiteral("toggle-type"),
++                          radio ? QStringLiteral("radio") : QStringLiteral("checkmark"));
++        properties.insert(QStringLiteral("toggle-state"), action->isChecked() ? 1 : 0);
++    }
++    const QString iconName = action->icon().name();
++    if (!iconName.isEmpty())
++        properties.insert(QStringLiteral("icon-name"), iconName);
++    if (!action->shortcut().isEmpty())
++        properties.insert(QStringLiteral("shortcut"), QVariant::fromValue(shortcutOf(action->shortcut())));
++    return properties;
++}
++
++void CutefishMenuBridge::fillProperties(CutefishMenuLayoutItem &item, QAction *action) const
++{
++    item.properties = layoutProperties(action);
++}
++
++int CutefishMenuBridge::idFor(QAction *action)
++{
++    const auto existing = m_ids.constFind(action);
++    if (existing != m_ids.constEnd())
++        return *existing;
++
++    const int id = m_nextId++;
++    m_ids.insert(action, id);
++    m_actions.insert(id, action);
++    connect(action, &QAction::changed, this, &CutefishMenuBridge::scheduleUpdate);
++    connect(action, &QObject::destroyed, this, [this, action] {
++        m_actions.remove(m_ids.take(action));
++        scheduleUpdate();
++    });
++    if (QMenu *menu = action->menu())
++        watchMenu(menu);
++    return id;
++}
++
++QAction *CutefishMenuBridge::actionFor(int id) const
++{
++    return m_actions.value(id, nullptr);
++}
++
++void CutefishMenuBridge::watchMenu(QMenu *menu)
++{
++    if (!menu || m_watched.contains(menu))
++        return;
++    m_watched.insert(menu);
++    menu->installEventFilter(this);
++    connect(menu, &QMenu::aboutToShow, this, &CutefishMenuBridge::scheduleUpdate);
++    connect(menu, &QObject::destroyed, this, [this, menu] { m_watched.remove(menu); });
++}
++
++bool CutefishMenuBridge::eventFilter(QObject *watched, QEvent *event)
++{
++    if (watched == m_menuBar || m_watched.contains(watched)) {
++        switch (event->type()) {
++        case QEvent::ActionAdded:
++        case QEvent::ActionRemoved:
++        case QEvent::ActionChanged:
++        case QEvent::EnabledChange:
++        case QEvent::Hide:
++        case QEvent::Show:
++            scheduleUpdate();
++            break;
++        default:
++            break;
++        }
++    }
++    return false;
++}
++
++void CutefishMenuBridge::scheduleUpdate()
++{
++    if (m_updateQueued || !m_connection.isConnected() || m_path.isEmpty())
++        return;
++    m_updateQueued = true;
++    QMetaObject::invokeMethod(
++            this,
++            [this] {
++                m_updateQueued = false;
++                ++m_revision;
++                sendLayoutUpdated(0);
++            },
++            Qt::QueuedConnection);
++}
++
++void CutefishMenuBridge::sendLayoutUpdated(int parent)
++{
++    if (!m_connection.isConnected() || m_path.isEmpty())
++        return;
++    QDBusMessage signal = QDBusMessage::createSignal(m_path, QString::fromLatin1(kMenuInterface),
++                                                     QStringLiteral("LayoutUpdated"));
++    signal << m_revision << parent;
++    m_connection.send(signal);
++}
++
++CutefishMenuLayoutItem CutefishMenuBridge::buildLayout(int parentId, int depth)
++{
++    depth = qBound(0, depth, 4);
++
++    CutefishMenuLayoutItem item;
++    item.id = parentId;
++    if (parentId == 0) {
++        item.properties.insert(QStringLiteral("children-display"), QStringLiteral("submenu"));
++        if (m_menuBar && depth != 0) {
++            const QList<QAction *> actions = m_menuBar->actions();
++            for (QAction *action : actions)
++                item.children.append(actionItem(action, depth - 1));
++        }
++        return item;
++    }
++    if (QAction *action = actionFor(parentId))
++        return actionItem(action, depth);
++    return item;
++}
++
++CutefishMenuLayoutItem CutefishMenuBridge::actionItem(QAction *action, int depth)
++{
++    CutefishMenuLayoutItem item;
++    item.id = idFor(action);
++    fillProperties(item, action);
++    if (depth != 0 && action->menu()) {
++        watchMenu(action->menu());
++        const QList<QAction *> actions = action->menu()->actions();
++        for (QAction *child : actions)
++            item.children.append(actionItem(child, depth - 1));
++    }
++    return item;
++}
++
++QVariantMap CutefishMenuBridge::dbusProperties() const
++{
++    return {
++        {QStringLiteral("Version"), uint(4)},
++        {QStringLiteral("TextDirection"), QStringLiteral("ltr")},
++        {QStringLiteral("Status"), QStringLiteral("normal")},
++        {QStringLiteral("IconThemePath"), QStringList()},
++    };
++}
++
++QString CutefishMenuBridge::introspect(const QString &path) const
++{
++    Q_UNUSED(path);
++    return QStringLiteral(
++            "<!DOCTYPE node PUBLIC \"-//freedesktop//DTD D-BUS Object Introspection 1.0//EN\"\n"
++            " \"http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd\">\n"
++            "<node>\n"
++            "  <interface name=\"com.canonical.dbusmenu\">\n"
++            "    <method name=\"GetLayout\">\n"
++            "      <arg name=\"parentId\" type=\"i\" direction=\"in\"/>\n"
++            "      <arg name=\"recursionDepth\" type=\"i\" direction=\"in\"/>\n"
++            "      <arg name=\"propertyNames\" type=\"as\" direction=\"in\"/>\n"
++            "      <arg name=\"revision\" type=\"u\" direction=\"out\"/>\n"
++            "      <arg name=\"layout\" type=\"(ia{sv}av)\" direction=\"out\"/>\n"
++            "    </method>\n"
++            "    <method name=\"GetProperty\">\n"
++            "      <arg name=\"id\" type=\"i\" direction=\"in\"/>\n"
++            "      <arg name=\"name\" type=\"s\" direction=\"in\"/>\n"
++            "      <arg name=\"value\" type=\"v\" direction=\"out\"/>\n"
++            "    </method>\n"
++            "    <method name=\"Event\">\n"
++            "      <arg name=\"id\" type=\"i\" direction=\"in\"/>\n"
++            "      <arg name=\"eventId\" type=\"s\" direction=\"in\"/>\n"
++            "      <arg name=\"data\" type=\"v\" direction=\"in\"/>\n"
++            "      <arg name=\"timestamp\" type=\"u\" direction=\"in\"/>\n"
++            "    </method>\n"
++            "    <method name=\"EventGroup\">\n"
++            "      <arg name=\"events\" type=\"a(isvu)\" direction=\"in\"/>\n"
++            "      <arg name=\"idErrors\" type=\"ai\" direction=\"out\"/>\n"
++            "    </method>\n"
++            "    <method name=\"AboutToShow\">\n"
++            "      <arg name=\"id\" type=\"i\" direction=\"in\"/>\n"
++            "      <arg name=\"needUpdate\" type=\"b\" direction=\"out\"/>\n"
++            "    </method>\n"
++            "    <signal name=\"LayoutUpdated\">\n"
++            "      <arg name=\"revision\" type=\"u\"/>\n"
++            "      <arg name=\"parent\" type=\"i\"/>\n"
++            "    </signal>\n"
++            "    <signal name=\"ItemsPropertiesUpdated\">\n"
++            "      <arg name=\"updatedProps\" type=\"a(ia{sv})\"/>\n"
++            "      <arg name=\"removedProps\" type=\"a(ias)\"/>\n"
++            "    </signal>\n"
++            "    <signal name=\"ItemActivationRequested\">\n"
++            "      <arg name=\"id\" type=\"i\"/>\n"
++            "      <arg name=\"timestamp\" type=\"u\"/>\n"
++            "    </signal>\n"
++            "    <property name=\"Version\" type=\"u\" access=\"read\"/>\n"
++            "    <property name=\"TextDirection\" type=\"s\" access=\"read\"/>\n"
++            "    <property name=\"Status\" type=\"s\" access=\"read\"/>\n"
++            "    <property name=\"IconThemePath\" type=\"as\" access=\"read\"/>\n"
++            "  </interface>\n"
++            "</node>\n");
++}
++
++bool CutefishMenuBridge::handleMessage(const QDBusMessage &message,
++                                       const QDBusConnection &connection)
++{
++    if (message.type() != QDBusMessage::MethodCallMessage)
++        return false;
++
++    const QString interface = message.interface();
++    const QString member = message.member();
++    const QList<QVariant> args = message.arguments();
++
++    if (interface == QLatin1String("org.freedesktop.DBus.Properties")) {
++        if (member == QLatin1String("Get")) {
++            // (interface, property)
++            const QString name = args.value(1).toString();
++            const QVariantMap all = dbusProperties();
++            if (!all.contains(name)) {
++                connection.send(message.createErrorReply(
++                        QStringLiteral("org.freedesktop.DBus.Error.InvalidArgs"),
++                        QStringLiteral("No such property: %1").arg(name)));
++            } else {
++                QDBusMessage reply = message.createReply();
++                reply << QVariant::fromValue(QDBusVariant(all.value(name)));
++                connection.send(reply);
++            }
++            return true;
++        }
++        if (member == QLatin1String("GetAll")) {
++            QDBusMessage reply = message.createReply();
++            reply << QVariant::fromValue(dbusProperties());
++            connection.send(reply);
++            return true;
++        }
++        return false;
++    }
++
++    if (interface != QLatin1String(kMenuInterface))
++        return false;
++
++    if (member == QLatin1String("GetLayout")) {
++        const int parentId = args.value(0).toInt();
++        const int depth = args.value(1).toInt();
++        const CutefishMenuLayoutItem layout = buildLayout(parentId, depth);
++        QDBusMessage reply = message.createReply();
++        reply << QVariant::fromValue(m_revision) << QVariant::fromValue(layout);
++        connection.send(reply);
++        return true;
++    }
++
++    if (member == QLatin1String("GetProperty")) {
++        const int id = args.value(0).toInt();
++        const QString name = args.value(1).toString();
++        QVariantMap properties;
++        if (id == 0)
++            properties = buildLayout(0, 0).properties;
++        else if (QAction *action = actionFor(id))
++            properties = layoutProperties(action);
++        QDBusMessage reply = message.createReply();
++        reply << QVariant::fromValue(QDBusVariant(properties.value(name)));
++        connection.send(reply);
++        return true;
++    }
++
++    if (member == QLatin1String("AboutToShow")) {
++        const int id = args.value(0).toInt();
++        if (QAction *action = actionFor(id); action && action->menu())
++            QMetaObject::invokeMethod(action->menu(), "aboutToShow", Qt::DirectConnection);
++        QDBusMessage reply = message.createReply();
++        reply << QVariant::fromValue(false);
++        connection.send(reply);
++        // The application may have brought the entries up to date while it
++        // answered; ask the shell to read them again.
++        QMetaObject::invokeMethod(
++                this,
++                [this, id] {
++                    ++m_revision;
++                    sendLayoutUpdated(id);
++                },
++                Qt::QueuedConnection);
++        return true;
++    }
++
++    if (member == QLatin1String("Event") || member == QLatin1String("EventGroup")) {
++        if (member == QLatin1String("Event")) {
++            const int id = args.value(0).toInt();
++            const QString event = args.value(1).toString();
++            if (event == QLatin1String("clicked")) {
++                if (QAction *action = actionFor(id))
++                    action->trigger();
++            }
++            QDBusMessage reply = message.createReply();
++            connection.send(reply);
++        } else {
++            QDBusMessage reply = message.createReply();
++            reply << QVariant::fromValue(QList<int>());
++            connection.send(reply);
++        }
++        return true;
++    }
++
++    connection.send(message.createErrorReply(
++            QDBusError::UnknownMethod,
++            QStringLiteral("com.canonical.dbusmenu has no method %1").arg(member)));
++    return true;
++}
++
++CutefishMenuBar::CutefishMenuBar(QObject *parent)
++    : QPlatformMenuBar()
++    , m_connection(QString())
++{
++    if (parent)
++        setParent(parent);
++}
++
++CutefishMenuBar::~CutefishMenuBar()
++{
++    unregister();
++    if (!m_connectionName.isEmpty()) {
++        QDBusConnection::disconnectFromBus(m_connectionName);
++        m_connectionName.clear();
++    }
++}
++
++// The platform menu bar is only what tells Qt the menu bar is shown by the
++// desktop: the entries come from the widgets, not from these objects.
++void CutefishMenuBar::insertMenu(QPlatformMenu *menu, QPlatformMenu *before)
++{
++    Q_UNUSED(menu);
++    Q_UNUSED(before);
++}
++
++void CutefishMenuBar::removeMenu(QPlatformMenu *menu)
++{
++    Q_UNUSED(menu);
++}
++
++void CutefishMenuBar::syncMenu(QPlatformMenu *menu)
++{
++    Q_UNUSED(menu);
++}
++
++QPlatformMenu *CutefishMenuBar::menuForTag(quintptr tag) const
++{
++    Q_UNUSED(tag);
++    return nullptr;
++}
++
++QMenuBar *CutefishMenuBar::menuBarFor(QWindow *window) const
++{
++    if (!window)
++        return nullptr;
++    const QList<QWidget *> windows = QApplication::topLevelWidgets();
++    for (QWidget *widget : windows) {
++        if (widget->windowHandle() != window)
++            continue;
++        if (QMenuBar *bar = widget->findChild<QMenuBar *>())
++            return bar;
++    }
++    return nullptr;
++}
++
++void CutefishMenuBar::handleReparent(QWindow *newParentWindow)
++{
++    // Qt repeats this call when the window is shown, and when a menu bar is
++    // replaced on the same window; only the latter needs a new export.
++    if (newParentWindow == m_window && m_bridge
++        && m_bridge->menuBar() == menuBarFor(newParentWindow)) {
++        return;
++    }
++    unregister();
++    m_window = newParentWindow;
++    if (m_window)
++        registerFor(m_window);
++}
++
++void CutefishMenuBar::registerFor(QWindow *window)
++{
++    QMenuBar *bar = menuBarFor(window);
++    if (!bar)
++        return;
++
++    if (m_connectionName.isEmpty()) {
++        m_connectionName = QStringLiteral("cutefish-menu-%1-%2")
++                                   .arg(QCoreApplication::applicationPid())
++                                   .arg(++s_connectionCounter);
++        m_connection = QDBusConnection::connectToBus(QDBusConnection::SessionBus, m_connectionName);
++        if (!m_connection.isConnected()) {
++            qWarning("Cutefish menu bar: cannot connect to the session bus");
++            m_connectionName.clear();
++            return;
++        }
++    }
++
++    m_path = QStringLiteral("/CutefishMenuBar/%1").arg(++s_pathCounter);
++    auto *bridge = new CutefishMenuBridge;
++    bridge->setAddress(m_connection, m_path);
++    bridge->setMenuBar(bar);
++    if (!m_connection.registerVirtualObject(m_path, bridge)) {
++        qWarning("Cutefish menu bar: cannot export %s", qPrintable(m_path));
++        delete bridge;
++        m_path.clear();
++        return;
++    }
++    m_bridge = bridge;
++
++    if (QGuiApplication::platformName() == QLatin1String("xcb")) {
++        m_windowId = quint64(window->winId());
++        QDBusMessage call = QDBusMessage::createMethodCall(
++                QString::fromLatin1(kRegistrarService), QString::fromLatin1(kRegistrarPath),
++                QString::fromLatin1(kRegistrarInterface), QStringLiteral("RegisterWindow"));
++        call << uint(m_windowId) << QDBusObjectPath(m_path);
++        const QDBusMessage reply = m_connection.call(call, QDBus::Block, kRegistrarTimeout);
++        if (reply.type() == QDBusMessage::ErrorMessage) {
++            qWarning("Cutefish menu bar: cannot register the window menu: %s",
++                     qPrintable(reply.errorMessage()));
++        } else {
++            m_registeredWithRegistrar = true;
++        }
++    } else if (QDesktopUnixServices *services = desktopServices()) {
++        services->registerDBusMenuForWindow(window, m_connection.baseService(), m_path);
++    }
++}
++
++void CutefishMenuBar::callRegistrar(const QString &method)
++{
++    if (!m_connection.isConnected() || m_windowId == 0)
++        return;
++    QDBusMessage call = QDBusMessage::createMethodCall(
++            QString::fromLatin1(kRegistrarService), QString::fromLatin1(kRegistrarPath),
++            QString::fromLatin1(kRegistrarInterface), method);
++    call << uint(m_windowId);
++    m_connection.call(call, QDBus::Block, kRegistrarTimeout);
++}
++
++void CutefishMenuBar::unregister()
++{
++    if (m_bridge) {
++        if (m_registeredWithRegistrar) {
++            callRegistrar(QStringLiteral("UnregisterWindow"));
++        } else if (m_window) {
++            if (QDesktopUnixServices *services = desktopServices())
++                services->unregisterDBusMenuForWindow(m_window);
++        }
++        if (m_connection.isConnected() && !m_path.isEmpty())
++            m_connection.unregisterObject(m_path);
++        delete m_bridge;
++    }
++
++    m_bridge = nullptr;
++    m_path.clear();
++    m_windowId = 0;
++    m_registeredWithRegistrar = false;
++    m_window = nullptr;
++}
+diff --git a/platformtheme/cutefishmenubar.h b/platformtheme/cutefishmenubar.h
+new file mode 100644
+index 0000000..b115ceb
+--- /dev/null
++++ b/platformtheme/cutefishmenubar.h
+@@ -0,0 +1,115 @@
++// Copyright 2026 Reion Wong <reionwong@gmail.com>
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef CUTEFISHMENUBAR_H
++#define CUTEFISHMENUBAR_H
++
++#include <QDBusArgument>
++#include <QDBusConnection>
++#include <QDBusVirtualObject>
++#include <QHash>
++#include <QPointer>
++#include <QSet>
++#include <QStringList>
++#include <QVariantMap>
++
++#include <qpa/qplatformmenu.h>
++
++class QAction;
++class QMenu;
++class QMenuBar;
++class QWindow;
++
++// One entry of the com.canonical.dbusmenu layout, as the menu bar in the
++// shell reads it: GetLayout returns the root of a tree of these.
++struct CutefishMenuLayoutItem
++{
++    int id = 0;
++    QVariantMap properties;
++    QList<CutefishMenuLayoutItem> children;
++};
++
++QDBusArgument &operator<<(QDBusArgument &argument, const CutefishMenuLayoutItem &item);
++const QDBusArgument &operator>>(const QDBusArgument &argument, CutefishMenuLayoutItem &item);
++
++Q_DECLARE_METATYPE(CutefishMenuLayoutItem)
++
++// The com.canonical.dbusmenu object of one window's menu bar. It reads the
++// window's QMenuBar whenever the shell asks, so menus an application builds
++// and changes while it runs are always current.
++class CutefishMenuBridge : public QDBusVirtualObject
++{
++public:
++    explicit CutefishMenuBridge(QObject *parent = nullptr);
++    ~CutefishMenuBridge() override;
++
++    void setAddress(const QDBusConnection &connection, const QString &path);
++    void setMenuBar(QMenuBar *menuBar);
++    QMenuBar *menuBar() const;
++
++    QString introspect(const QString &path) const override;
++    bool handleMessage(const QDBusMessage &message, const QDBusConnection &connection) override;
++
++protected:
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
++private:
++    CutefishMenuLayoutItem buildLayout(int parentId, int depth);
++    CutefishMenuLayoutItem actionItem(QAction *action, int depth);
++    void fillProperties(CutefishMenuLayoutItem &item, QAction *action) const;
++    int idFor(QAction *action);
++    QAction *actionFor(int id) const;
++    void watchMenu(QMenu *menu);
++    void scheduleUpdate();
++    void sendLayoutUpdated(int parent);
++    QVariantMap dbusProperties() const;
++
++    static QString convertMnemonic(const QString &label);
++    static QList<QStringList> shortcutOf(const QKeySequence &sequence);
++    static QVariantMap layoutProperties(QAction *action);
++
++    QPointer<QMenuBar> m_menuBar;
++    QDBusConnection m_connection;
++    QString m_path;
++    QHash<QAction *, int> m_ids;
++    QHash<int, QAction *> m_actions;
++    QSet<QObject *> m_watched;
++    int m_nextId = 1;
++    uint m_revision = 1;
++    bool m_updateQueued = false;
++};
++
++// The platform menu bar of the Cutefish theme. It takes a window's menu bar
++// over, so the application draws none, and serves it to the shell from a
++// D-Bus connection of its own. The application's session-bus connection can
++// stop delivering object calls (some Qt applications do); a connection made
++// here for the menu alone keeps working.
++class CutefishMenuBar : public QPlatformMenuBar
++{
++public:
++    explicit CutefishMenuBar(QObject *parent = nullptr);
++    ~CutefishMenuBar() override;
++
++    void insertMenu(QPlatformMenu *menu, QPlatformMenu *before) override;
++    void removeMenu(QPlatformMenu *menu) override;
++    void syncMenu(QPlatformMenu *menu) override;
++    void handleReparent(QWindow *newParentWindow) override;
++    QPlatformMenu *menuForTag(quintptr tag) const override;
++
++private:
++    void registerFor(QWindow *window);
++    void unregister();
++    void callRegistrar(const QString &method);
++    QMenuBar *menuBarFor(QWindow *window) const;
++
++    QWindow *m_window = nullptr;
++    QString m_connectionName;
++    QDBusConnection m_connection;
++    QString m_path;
++    QPointer<CutefishMenuBridge> m_bridge;
++    quint64 m_windowId = 0;
++    bool m_registeredWithRegistrar = false;
++};
++
++#endif // CUTEFISHMENUBAR_H
+diff --git a/platformtheme/platformtheme.cpp b/platformtheme/platformtheme.cpp
+index 2042528..4093fa4 100644
+--- a/platformtheme/platformtheme.cpp
++++ b/platformtheme/platformtheme.cpp
+@@ -1,4 +1,5 @@
+ #include "platformtheme.h"
++#include "cutefishmenubar.h"
+ #include "filedialoghelper.h"
+ #include "touchpadscrolling.h"
+ 
+@@ -134,6 +135,14 @@ QPlatformDialogHelper *PlatformTheme::createPlatformDialogHelper(DialogType type
+     return QGenericUnixTheme::createPlatformDialogHelper(type);
+ }
+ 
++// The shell shows the application's menu bar; the bar this returns serves it
++// from a D-Bus connection of its own, so the application can keep its session
++// bus for everything else.
++QPlatformMenuBar *PlatformTheme::createPlatformMenuBar() const
++{
++    return new CutefishMenuBar;
++}
++
+ void PlatformTheme::onFontChanged()
+ {
+     QFont font;
+diff --git a/platformtheme/platformtheme.h b/platformtheme/platformtheme.h
+index 0562827..7dcf437 100644
+--- a/platformtheme/platformtheme.h
++++ b/platformtheme/platformtheme.h
+@@ -10,6 +10,8 @@
+ #endif
+ #include "hintsettings.h"
+ 
++class QPlatformMenuBar;
++
+ class PlatformTheme : public QObject, public QGenericUnixTheme
+ {
+     Q_OBJECT
+@@ -26,6 +28,8 @@ public:
+     bool usePlatformNativeDialog(DialogType type) const override;
+     QPlatformDialogHelper *createPlatformDialogHelper(DialogType type) const override;
+ 
++    QPlatformMenuBar *createPlatformMenuBar() const override;
++
+ private:
+     void onFontChanged();
+     void onIconThemeChanged();
