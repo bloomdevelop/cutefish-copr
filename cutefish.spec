@@ -485,7 +485,7 @@ fi
 %files toolkit
 %license cutefish-toolkit-%{version}/LICENSE
 %{_libdir}/libcutefish-toolkit*
-%{_includedir}/cutefish-toolkit/
+%{_includedir}/cutefish-toolkit-base/
 %{_libdir}/cmake/CutefishToolkit/
 
 %files framework
