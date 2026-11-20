@@ -485,7 +485,11 @@ fi
 %files toolkit
 %license cutefish-toolkit-%{version}/LICENSE
 %{_libdir}/libcutefish-toolkit*
+# The toolkit installs two public header trees: the UI headers under
+# /usr/include/cutefish-toolkit and, since the upstream rename, the base
+# library's headers under /usr/include/cutefish-toolkit-base.
 %{_includedir}/cutefish-toolkit/
+%{_includedir}/cutefish-toolkit-base/
 %{_libdir}/cmake/CutefishToolkit/
 
 %files framework
